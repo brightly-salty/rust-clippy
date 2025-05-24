@@ -28,6 +28,7 @@
 extern crate indexmap;
 extern crate rustc_abi;
 extern crate rustc_ast;
+extern crate rustc_attr_data_structures;
 extern crate rustc_attr_parsing;
 extern crate rustc_const_eval;
 extern crate rustc_data_structures;
@@ -88,7 +89,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use itertools::Itertools;
 use rustc_abi::Integer;
 use rustc_ast::ast::{self, LitKind, RangeLimits};
-use rustc_attr_parsing::{AttributeKind, find_attr};
+use rustc_attr_data_structures::{AttributeKind, find_attr};
 use rustc_data_structures::fx::FxHashMap;
 use rustc_data_structures::packed::Pu128;
 use rustc_data_structures::unhash::UnindexMap;
@@ -523,12 +524,8 @@ pub fn path_def_id<'tcx>(cx: &LateContext<'_>, maybe_path: &impl MaybePath<'tcx>
 ///     }
 /// }
 /// ```
-pub fn trait_ref_of_method<'tcx>(cx: &LateContext<'tcx>, def_id: LocalDefId) -> Option<&'tcx TraitRef<'tcx>> {
-    // Get the implemented trait for the current function
-    let hir_id = cx.tcx.local_def_id_to_hir_id(def_id);
-    let parent_impl = cx.tcx.hir_get_parent_item(hir_id);
-    if parent_impl != hir::CRATE_OWNER_ID
-        && let Node::Item(item) = cx.tcx.hir_node_by_def_id(parent_impl.def_id)
+pub fn trait_ref_of_method<'tcx>(cx: &LateContext<'tcx>, owner: OwnerId) -> Option<&'tcx TraitRef<'tcx>> {
+    if let Node::Item(item) = cx.tcx.hir_node(cx.tcx.hir_owner_parent(owner))
         && let ItemKind::Impl(impl_) = &item.kind
     {
         return impl_.of_trait.as_ref();
@@ -1101,13 +1098,13 @@ pub fn method_calls<'tcx>(expr: &'tcx Expr<'tcx>, max_depth: usize) -> (Vec<Symb
 /// `method_chain_args(expr, &["bar", "baz"])` will return a `Vec`
 /// containing the `Expr`s for
 /// `.bar()` and `.baz()`
-pub fn method_chain_args<'a>(expr: &'a Expr<'_>, methods: &[&str]) -> Option<Vec<(&'a Expr<'a>, &'a [Expr<'a>])>> {
+pub fn method_chain_args<'a>(expr: &'a Expr<'_>, methods: &[Symbol]) -> Option<Vec<(&'a Expr<'a>, &'a [Expr<'a>])>> {
     let mut current = expr;
     let mut matched = Vec::with_capacity(methods.len());
     for method_name in methods.iter().rev() {
         // method chains are stored last -> first
         if let ExprKind::MethodCall(path, receiver, args, _) = current.kind {
-            if path.ident.name.as_str() == *method_name {
+            if path.ident.name == *method_name {
                 if receiver.span.from_expansion() || args.iter().any(|e| e.span.from_expansion()) {
                     return None;
                 }
@@ -1493,14 +1490,14 @@ pub fn is_adjusted(cx: &LateContext<'_>, e: &Expr<'_>) -> bool {
 /// macro `name`.
 /// See also [`is_direct_expn_of`].
 #[must_use]
-pub fn is_expn_of(mut span: Span, name: &str) -> Option<Span> {
+pub fn is_expn_of(mut span: Span, name: Symbol) -> Option<Span> {
     loop {
         if span.from_expansion() {
             let data = span.ctxt().outer_expn_data();
             let new_span = data.call_site;
 
             if let ExpnKind::Macro(MacroKind::Bang, mac_name) = data.kind
-                && mac_name.as_str() == name
+                && mac_name == name
             {
                 return Some(new_span);
             }
@@ -1523,13 +1520,13 @@ pub fn is_expn_of(mut span: Span, name: &str) -> Option<Span> {
 /// `42` is considered expanded from `foo!` and `bar!` by `is_expn_of` but only
 /// from `bar!` by `is_direct_expn_of`.
 #[must_use]
-pub fn is_direct_expn_of(span: Span, name: &str) -> Option<Span> {
+pub fn is_direct_expn_of(span: Span, name: Symbol) -> Option<Span> {
     if span.from_expansion() {
         let data = span.ctxt().outer_expn_data();
         let new_span = data.call_site;
 
         if let ExpnKind::Macro(MacroKind::Bang, mac_name) = data.kind
-            && mac_name.as_str() == name
+            && mac_name == name
         {
             return Some(new_span);
         }
@@ -1793,11 +1790,11 @@ pub fn in_automatically_derived(tcx: TyCtxt<'_>, id: HirId) -> bool {
 }
 
 /// Checks if the given `DefId` matches the `libc` item.
-pub fn match_libc_symbol(cx: &LateContext<'_>, did: DefId, name: &str) -> bool {
+pub fn match_libc_symbol(cx: &LateContext<'_>, did: DefId, name: Symbol) -> bool {
     let path = cx.get_def_path(did);
     // libc is meant to be used as a flat list of names, but they're all actually defined in different
     // modules based on the target platform. Ignore everything but crate name and the item name.
-    path.first().is_some_and(|s| *s == sym::libc) && path.last().is_some_and(|s| s.as_str() == name)
+    path.first().is_some_and(|s| *s == sym::libc) && path.last().copied() == Some(name)
 }
 
 /// Returns the list of condition expressions and the list of blocks in a
